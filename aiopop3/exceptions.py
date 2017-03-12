@@ -68,7 +68,7 @@ class AuthLoginDelay(BaseCodedException):
     message = 'Login delay not expired'
 
 
-class POP3AuthInUse(BaseCodedException):
+class AuthInUseException(BaseCodedException):
     """
     RFC 2449 p 8.1.2 Exception when client connects and other session is active
     """

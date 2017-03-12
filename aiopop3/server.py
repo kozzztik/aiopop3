@@ -17,11 +17,25 @@ https://tools.ietf.org/html/rfc2595
 RFC 3206 The SYS and AUTH POP Response Codes
 https://tools.ietf.org/html/rfc3206
 
+RFC 1734 POP3 AUTHentication command
+https://tools.ietf.org/html/rfc1734
+
+RFC 2222 Simple Authentication and Security Layer (SASL)
+https://tools.ietf.org/html/rfc2222
+
+RFC 5034 The Post Office Protocol (POP3) Simple Authentication and Security
+Layer (SASL) Authentication Mechanism
+https://tools.ietf.org/html/rfc5034
+
+RFC 4616 The PLAIN Simple Authentication and Security Layer (SASL) Mechanism
+https://tools.ietf.org/html/rfc4616
+
 """
 
 import os
 import re
 import time
+import base64
 import socket
 import asyncio
 import logging
@@ -91,6 +105,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         self._greeting = '{}.{}@{}'.format(
             os.getpid(), time.monotonic(), hostname)
         self.__ident__ = __ident__
+        self.auth_mechanizms = ['PLAIN']
 
     def connection_made(self, transport):
         is_instance = (_has_ssl and
@@ -130,6 +145,16 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         yield from self._stream_writer.drain()
 
     @asyncio.coroutine
+    def _read_line(self):
+        line = yield from asyncio.wait_for(
+            self._stream_reader.readline(),
+            self._timeout,
+            loop=self.loop)
+        if not line:
+            raise asyncio.IncompleteReadError(line, None)
+        return line.decode('utf-8').rstrip('\r\n')
+
+    @asyncio.coroutine
     def _handle_client(self):
         log.info('handling connection')
         yield from self.push(
@@ -137,19 +162,12 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         while not self.connection_closed:
             # XXX Put the line limit stuff into the StreamReader?
             try:
-                line = yield from asyncio.wait_for(
-                    self._stream_reader.readline(),
-                    self._timeout,
-                    loop=self.loop)
+                line = yield from self._read_line()
             except TimeoutError:
                 log.info('Close session by timeout')
                 self.close()
                 return
-            if not line:
-                break
             try:
-                # XXX this rstrip may not completely preserve old behavior.
-                line = line.decode('utf-8').rstrip('\r\n')
                 log.info('Data: %r', line)
                 if not line:
                     yield from self.push('-ERR bad syntax')
@@ -269,6 +287,9 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                 self.handler.retention_period))
             yield from self.push('LOGIN-DELAY {}'.format(
                 self.handler.login_delay))
+            if self.auth_mechanizms:
+                yield from self.push('SASL {}'.format(
+                    ' '.join(self.auth_mechanizms)))
         # TODO Not really capable in sending responses, but must work
         yield from self.push('RESP-CODES')
         yield from self.push('AUTH-RESP-CODE')
@@ -276,7 +297,6 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if self.__ident__:
             yield from self.push('IMPLEMENTATION {}'.format(self.__ident__))
         # TODO SDPS
-        # TODO SASL
         yield from self.capa_hook()
         yield from self.push('.')
 
@@ -286,7 +306,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             raise POP3Exception('Syntax: APOP <user_name> <password_hash>')
         if self._auth_passed:
             raise POP3Exception('Already authenticated')
-        user_name, user_hash = ''.split(' ', maxsplit=1)
+        user_name, user_hash = arg.split(' ', maxsplit=1)
         mail_box = yield from self.handler.handle_user(user_name)
         if not mail_box:
             raise AuthFailed()
@@ -322,9 +342,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if not mail_box:
             raise AuthFailed()
         try:
-            result = yield from mail_box.check_password(arg)
-            if not result:
-                raise AuthFailed()
+            yield from mail_box.check_password(arg)
         except Exception:
             yield from mail_box.rollback()
             raise
@@ -480,3 +498,44 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             for i, message in enumerate(self._messages):
                 yield from self.push('{} {}'.format(i, message.message_id))
             yield from self.push('.')
+
+    @asyncio.coroutine
+    def pop_AUTH(self, arg):
+        if not arg:
+            raise POP3Exception('Unrecognized authentication type')
+        if ' ' in arg:
+            name, initial = arg.split(' ', maxsplit=1)
+        else:
+            name = arg.upper()
+            initial = None
+        if name not in self.auth_mechanizms:
+            raise POP3Exception('Unrecognized authentication type')
+        if self._auth_passed:
+            raise POP3Exception('Already authenticated')
+        method = getattr(self, 'auth_' + name, None)
+        if not method:
+            raise POP3Exception('[SYS/PERM] Authentication type not supported')
+        mail_box = yield from method(initial)
+        if not mail_box:
+            raise AuthFailed()
+        self._auth_passed = True
+        self._mail_box = mail_box
+        yield from self.push('+OK {} authentication successful'.format(name))
+
+    @asyncio.coroutine
+    def auth_PLAIN(self, arg):
+        if not arg:
+            yield from self.push('+')
+            arg = yield from self._read_line()
+        arg = base64.b64decode(arg)
+        params = arg.split(b'\x00')
+        authzid, authcid, passwd = [p.decode('utf-8') for p in params]
+        mail_box = yield from self.handler.handle_user(authcid)
+        if not mail_box:
+            return
+        try:
+            yield from mail_box.check_password(passwd)
+        except Exception:
+            yield from mail_box.rollback()
+            raise
+        return mail_box

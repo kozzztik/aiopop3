@@ -69,9 +69,9 @@ class MailBox:
     @asyncio.coroutine
     def check_password(self, password):
         """
-        Returns user password for USER/PASS auth. You must implement either
-        this or get password method.
-        :return bool: True if check passed
+        Checks password for plain auth. You must implement either
+        this or get password method. Raise Auth failed if password is wrong
+        :return:
         """
         raise AuthNotSupported()
 

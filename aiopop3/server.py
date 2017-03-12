@@ -14,6 +14,9 @@ https://tools.ietf.org/html/rfc2449
 RFC 2595 Using TLS with IMAP, POP3 and ACAP
 https://tools.ietf.org/html/rfc2595
 
+RFC 3206 The SYS and AUTH POP Response Codes
+https://tools.ietf.org/html/rfc3206
+
 """
 
 import os
@@ -24,7 +27,14 @@ import asyncio
 import logging
 import hashlib
 
-from .base_handler import POP3Exception, POP3AuthFailed, BaseHandler
+from .base_handler import BaseHandler
+from .exceptions import (
+    POP3Exception,
+    BaseCodedException,
+    AuthFailed,
+    PermException,
+)
+
 try:
     import ssl
     from asyncio import sslproto
@@ -169,10 +179,13 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                         '-ERR command "%s" not recognized' % command)
                     continue
                 yield from method(arg)
+            except BaseCodedException as error:
+                yield from self.push('-ERR [{}] {}'.format(
+                    error.code, error.message))
             except POP3Exception as error:
                 yield from self.push('-ERR {}'.format(error.message))
             except Exception as error:
-                yield from self.push('-ERR: ({}) {}'.format(
+                yield from self.push('-ERR [SYS/TEMP] ({}) {}'.format(
                     error.__class__.__name__, str(error)))
                 log.exception('POP3 session exception')
                 yield from self.handler.handle_exception(error)
@@ -201,7 +214,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
     @asyncio.coroutine
     def _load_messages(self):
         if not self._auth_passed:
-            raise POP3Exception('Authorization required')
+            raise PermException('Authorization required')
         if self._messages is not None:
             return
         self._messages = yield from self._mail_box.get_messages()
@@ -249,14 +262,19 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             if retention_period is None:
                 retention_period = 'NEVER'
             yield from self.push('EXPIRE {}'.format(retention_period))
+            yield from self.push('LOGIN-DELAY {}'.format(
+                self._mail_box.login_delay))
         else:
-            yield from self.push('EXPIRE 0 USER')
+            yield from self.push('EXPIRE {} USER'.format(
+                self.handler.retention_period))
+            yield from self.push('LOGIN-DELAY {}'.format(
+                self.handler.login_delay))
         # TODO Not really capable in sending responses, but must work
+        yield from self.push('RESP-CODES')
+        yield from self.push('AUTH-RESP-CODE')
         yield from self.push('PIPELINING')
         if self.__ident__:
             yield from self.push('IMPLEMENTATION {}'.format(self.__ident__))
-        # TODO RESP-CODES
-        # TODO LOGIN-DELAY
         # TODO SDPS
         # TODO SASL
         yield from self.capa_hook()
@@ -271,13 +289,13 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         user_name, user_hash = ''.split(' ', maxsplit=1)
         mail_box = yield from self.handler.handle_user(user_name)
         if not mail_box:
-            raise POP3AuthFailed()
+            raise AuthFailed()
         try:
             password = yield from self._mail_box.get_password()  # type: str
             digest = bytes(self._greeting + password, encoding='utf-8')
             digest = hashlib.md5(digest).hexdigest()
             if user_hash != digest:
-                raise POP3AuthFailed()
+                raise AuthFailed()
         except Exception:
             yield from mail_box.rollback()
             raise
@@ -302,11 +320,11 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             raise POP3Exception('Already authenticated')
         mail_box = yield from self.handler.handle_user(self._user_name)
         if not mail_box:
-            raise POP3AuthFailed()
+            raise AuthFailed()
         try:
             result = yield from mail_box.check_password(arg)
             if not result:
-                raise POP3AuthFailed()
+                raise AuthFailed()
         except Exception:
             yield from mail_box.rollback()
             raise

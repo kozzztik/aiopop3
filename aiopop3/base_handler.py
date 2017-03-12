@@ -1,29 +1,6 @@
 import asyncio
 
-
-class POP3Exception(Exception):
-    """
-    Some handlers methods are not able to return response string and handle
-    error by method return value. Raise this exception to indicate error and
-    provide response code and message.
-    """
-    def __init__(self, message):
-        super(POP3Exception, self).__init__(message)
-        self.message = message
-
-
-class POP3AuthNotSupported(POP3Exception):
-    def __init__(self):
-        super(POP3AuthNotSupported, self).__init__('Auth method not supported')
-
-
-class POP3AuthFailed(POP3Exception):
-    """
-    As said in RFC 1939 "13. Security Considerations" return invalid password
-    in all auth failed cases such as "no user mailbox"
-    """
-    def __init__(self):
-        super(POP3AuthFailed, self).__init__('Invalid password')
+from .exceptions import AuthNotSupported
 
 
 class POP3Message:
@@ -71,6 +48,15 @@ class MailBox:
         """
         return None
 
+    @property
+    def login_delay(self):
+        """
+        Delay between successfull login attempts depended on user by
+        RFC 2449 p 6.5
+        :return int:
+        """
+        return 0
+
     @asyncio.coroutine
     def get_password(self):
         """
@@ -78,7 +64,7 @@ class MailBox:
         check passord method
         :return str: user password
         """
-        raise POP3AuthNotSupported()
+        raise AuthNotSupported()
 
     @asyncio.coroutine
     def check_password(self, password):
@@ -87,7 +73,7 @@ class MailBox:
         this or get password method.
         :return bool: True if check passed
         """
-        raise POP3AuthNotSupported()
+        raise AuthNotSupported()
 
     @asyncio.coroutine
     def get_messages(self):
@@ -114,6 +100,9 @@ class BaseHandler:
 
     def __init__(self, loop):
         self.loop = loop
+        # This is default parameters declared in CAPA in authentication state
+        self.retention_period = 0
+        self.login_delay = 0
 
     def handle_tls_handshake(self, ssl_object, peercert, cipher):
         """

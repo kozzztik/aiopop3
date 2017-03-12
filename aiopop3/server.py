@@ -3,9 +3,16 @@
 Author: Konstantin Volkov <kozzztik@mail.ru>
 Based on aiosmtpd
 
-Implements RFC 1939 Post Office Protocol - Version 3
+Implements:
+
+RFC 1939 Post Office Protocol - Version 3
 https://tools.ietf.org/html/rfc1939
 
+RFC 2449 POP3 Extension Mechanism
+https://tools.ietf.org/html/rfc2449
+
+RFC 2595 Using TLS with IMAP, POP3 and ACAP
+https://tools.ietf.org/html/rfc2595
 
 """
 
@@ -28,6 +35,7 @@ else:                                               # pragma: nocover
 
 
 __version__ = '0.1'
+__ident__ = 'Python-aiopop3-{}'.format(__version__)
 
 log = logging.getLogger('server.pop3')
 
@@ -37,7 +45,7 @@ def _quote_periods(bindata):
 
 
 class POP3ServerProtocol(asyncio.StreamReaderProtocol):
-    command_size_limit = 128
+    command_size_limit = 255  # RFC 2449 p.4
 
     def __init__(self, handler,
                  *,
@@ -55,7 +63,6 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         hostname = hostname or socket.getfqdn()
         self.tls_context = tls_context
         if tls_context:
-            # TODO: Check it
             self.tls_context.check_hostname = False
             self.tls_context.verify_mode = ssl.CERT_NONE
         self.require_starttls = tls_context and require_starttls
@@ -73,6 +80,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         self._timeout = timeout
         self._greeting = '{}.{}@{}'.format(
             os.getpid(), time.monotonic(), hostname)
+        self.__ident__ = __ident__
 
     def connection_made(self, transport):
         is_instance = (_has_ssl and
@@ -82,7 +90,6 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             self._stream_reader._transport = transport
             self._stream_writer._transport = transport
             self.transport = transport
-            # TODO Check it
             # Why _extra is protected attribute?
             extra = self._tls_protocol._extra
             auth = self.handler.handle_tls_handshake(
@@ -91,6 +98,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                 extra['cipher'])
             self._tls_handshake_failed = not auth
             self._over_ssl = True
+            self._user_name = None
         else:
             super().connection_made(transport)
             # TODO context for auth
@@ -127,6 +135,8 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                 log.info('Close session by timeout')
                 self.close()
                 return
+            if not line:
+                break
             try:
                 # XXX this rstrip may not completely preserve old behavior.
                 line = line.decode('utf-8').rstrip('\r\n')
@@ -141,18 +151,17 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                 else:
                     command = line[:i].upper()
                     arg = line[i+1:].strip()
-                # TODO check stasttls here
                 if (self._tls_handshake_failed
-                        and command != 'QUIT'):             # pragma: nossl
+                        and command not in ['CAPA', 'QUIT']):  # pragma: nossl
                     yield from self.push(
                         '-ERR Command refused due to lack of security')
                     continue
                 if (self.require_starttls
                         and (not self._tls_protocol)
-                        and (command not in ['STLS', 'QUIT'])):
-                    # TODO RFC3207 part 4
+                        and (command not in ['STLS', 'CAPA', 'QUIT'])):
+                    # RFC2595 part 2.2
                     yield from self.push(
-                        '-ERR Must issue a STARTTLS command first')
+                        '-ERR Must issue a STLS command first')
                     continue
                 method = getattr(self, 'pop_' + command, None)
                 if not method:
@@ -178,7 +187,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
     def commit_transaction(self):
         if self._mail_box and self._auth_passed:
             nums = self._deleted_messages
-            if self._mail_box.remove_readed:
+            if self._mail_box.retention_period == 0:
                 for i in self._read_messages:
                     if i not in nums:
                         nums.append(i)
@@ -211,6 +220,47 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if arg in self._deleted_messages:
             raise POP3Exception('Message deleted')
         return arg, self._messages[arg]
+
+    @asyncio.coroutine
+    def capa_hook(self):
+        """Allow subclasses to extend CAPA responses.
+
+        This hook is called just before the final, non-continuing "."
+        response.  Subclasses can add additional to declare new capabilities
+        """
+        pass
+
+    @asyncio.coroutine
+    def pop_CAPA(self, arg):
+        yield from self.push('+OK Capability list follows')
+        if self.tls_context and not self._tls_protocol:
+            yield from self.push('STLS')
+        auth = not self._auth_passed
+        if self._tls_protocol and self._tls_handshake_failed:
+            auth = False
+        if self.require_starttls and not self._tls_protocol:
+            auth = False
+        if auth:
+            yield from self.push('USER')
+        if self._auth_passed:
+            yield from self.push('TOP')
+            yield from self.push('UIDL')
+            retention_period = self._mail_box.retention_period
+            if retention_period is None:
+                retention_period = 'NEVER'
+            yield from self.push('EXPIRE {}'.format(retention_period))
+        else:
+            yield from self.push('EXPIRE 0 USER')
+        # TODO Not really capable in sending responses, but must work
+        yield from self.push('PIPELINING')
+        if self.__ident__:
+            yield from self.push('IMPLEMENTATION {}'.format(self.__ident__))
+        # TODO RESP-CODES
+        # TODO LOGIN-DELAY
+        # TODO SDPS
+        # TODO SASL
+        yield from self.capa_hook()
+        yield from self.push('.')
 
     @asyncio.coroutine
     def pop_APOP(self, arg):
@@ -344,8 +394,10 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                     break
             self._stream_writer.write(_quote_periods(line))
             yield from self._stream_writer.drain()
-        yield from self.push('')
-        yield from self.push('.')
+        self._stream_writer.write(b'\r\n.\r\n')
+        log.info('Message {} ({}) {} first lines send'.format(
+            arg, message.message_id, lines_count))
+        yield from self._stream_writer.drain()
 
     @asyncio.coroutine
     def pop_RETR(self, arg):
@@ -354,8 +406,9 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         yield from self.push('+OK {} octets'.format(message.size))
         data = yield from message.get_data()
         self._stream_writer.write(_quote_periods(data))
-        yield from self.push('')
-        yield from self.push('.')
+        self._stream_writer.write(b'\r\n.\r\n')
+        log.info('Message {} ({}) is send'.format(arg, message.message_id))
+        yield from self._stream_writer.drain()
         if arg not in self._read_messages:
             self._read_messages.append(arg)
 
@@ -372,12 +425,16 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
 
     @asyncio.coroutine
     def pop_STLS(self, arg):  # pragma: nossl
-        log.info('===> STARTTLS')
+        log.info('STARTTLS')
         if arg:
             raise POP3Exception('Syntax: STARTTLS')
         if not (self.tls_context and _has_ssl):
             raise POP3Exception('TLS not available')
-        yield from self.push('+OK Ready to start TLS')
+        if self._auth_passed:
+            # RFC 2595 4
+            raise POP3Exception(
+                'Command is only valid in non-authenticated state')
+        yield from self.push('+OK Begin TLS negotiation')
         # Create SSL layer.
         self._tls_protocol = sslproto.SSLProtocol(
             self.loop,
@@ -405,6 +462,3 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             for i, message in enumerate(self._messages):
                 yield from self.push('{} {}'.format(i, message.message_id))
             yield from self.push('.')
-
-    # TODO SDPS
-    # TODO CAPA

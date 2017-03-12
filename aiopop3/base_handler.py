@@ -61,13 +61,15 @@ class MailBox:
         pass
 
     @property
-    def remove_readed(self):
+    def retention_period(self):
         """
-        Return true if needed to remove readed messages as said in RFC 1939
-        "8. Scaling and Operational Considerations"
-        :return bool:
+        Return retention period by RFC 2449 p 6.7 in days
+        None means mail never deleted by server, 0 - deleted after RETR
+        Note that 0 will trigger protocol to delete readed messages as if they
+        were deleted by user, so you don`t need to care about it.
+        :return int:
         """
-        return False
+        return None
 
     @asyncio.coroutine
     def get_password(self):

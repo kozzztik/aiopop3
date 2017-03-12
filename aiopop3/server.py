@@ -9,8 +9,9 @@ https://tools.ietf.org/html/rfc1939
 
 """
 
-
+import os
 import re
+import time
 import socket
 import asyncio
 import logging
@@ -30,6 +31,7 @@ __version__ = '0.1'
 
 log = logging.getLogger('server.pop3')
 
+
 def _quote_periods(bindata):
     return re.sub(br'(?m)^\.', b'..', bindata)
 
@@ -42,6 +44,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                  hostname=None,
                  tls_context=None,
                  require_starttls=False,
+                 timeout=600,
                  loop=None):
         self.loop = loop if loop else asyncio.get_event_loop()
         reader = asyncio.StreamReader(
@@ -67,7 +70,9 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         self._read_messages = []
         self._auth_passed = False
         self._user_name = None  # for USER/PASS auth
-        self._greeting = 'stamp@{}'.format(hostname)   # TODO generate stamp
+        self._timeout = timeout
+        self._greeting = '{}.{}@{}'.format(
+            os.getpid(), time.monotonic(), hostname)
 
     def connection_made(self, transport):
         is_instance = (_has_ssl and
@@ -88,6 +93,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             self._over_ssl = True
         else:
             super().connection_made(transport)
+            # TODO context for auth
             self.peer = transport.get_extra_info('peername')
             self.transport = transport
             log.info('Peer: %s', repr(self.peer))
@@ -113,8 +119,15 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         while not self.connection_closed:
             # XXX Put the line limit stuff into the StreamReader?
             try:
-                line = yield from self._stream_reader.readline()
-
+                line = yield from asyncio.wait_for(
+                    self._stream_reader.readline(),
+                    self._timeout,
+                    loop=self.loop)
+            except TimeoutError:
+                log.info('Close session by timeout')
+                self.close()
+                return
+            try:
                 # XXX this rstrip may not completely preserve old behavior.
                 line = line.decode('utf-8').rstrip('\r\n')
                 log.info('Data: %r', line)
@@ -210,7 +223,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if not mail_box:
             raise POP3AuthFailed()
         try:
-            password = yield from self._mail_box.get_password()
+            password = yield from self._mail_box.get_password()  # type: str
             digest = bytes(self._greeting + password, encoding='utf-8')
             digest = hashlib.md5(digest).hexdigest()
             if user_hash != digest:
@@ -318,8 +331,19 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         yield from self._load_messages()
         arg, message = self._get_message_by_num(num)
         data = yield from message.get_data()
-        data = _quote_periods(data)
-        # TODO
+        in_headers = True
+        i = 0
+        for line in data.splitlines(keepends=True):
+            # Dump the RFC 2822 headers first.
+            if in_headers:
+                if not line:
+                    in_headers = False
+            else:
+                i += 1
+                if i > lines_count:
+                    break
+            self._stream_writer.write(_quote_periods(line))
+            yield from self._stream_writer.drain()
         yield from self.push('')
         yield from self.push('.')
 

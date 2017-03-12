@@ -102,7 +102,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         self._auth_passed = False
         self._user_name = None  # for USER/PASS auth
         self._timeout = timeout
-        self._greeting = '{}.{}@{}'.format(
+        self._greeting = '<{}.{}@{}>'.format(
             os.getpid(), time.monotonic(), hostname)
         self.__ident__ = __ident__
         self.auth_mechanizms = ['PLAIN']
@@ -158,7 +158,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
     def _handle_client(self):
         log.info('handling connection')
         yield from self.push(
-            '+OK POP3 server ready <{}>'.format(self._greeting))
+            '+OK POP3 server ready {}'.format(self._greeting))
         while not self.connection_closed:
             # XXX Put the line limit stuff into the StreamReader?
             try:
@@ -232,7 +232,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
     @asyncio.coroutine
     def _load_messages(self):
         if not self._auth_passed:
-            raise PermException('Authorization required')
+            raise POP3Exception('Authorization required')
         if self._messages is not None:
             return
         self._messages = yield from self._mail_box.get_messages()
@@ -273,6 +273,9 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             auth = False
         if auth:
             yield from self.push('USER')
+            if self.auth_mechanizms:
+                yield from self.push('SASL {}'.format(
+                    ' '.join(self.auth_mechanizms)))
         if self._auth_passed:
             yield from self.push('TOP')
             yield from self.push('UIDL')
@@ -287,9 +290,6 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
                 self.handler.retention_period))
             yield from self.push('LOGIN-DELAY {}'.format(
                 self.handler.login_delay))
-            if self.auth_mechanizms:
-                yield from self.push('SASL {}'.format(
-                    ' '.join(self.auth_mechanizms)))
         # TODO Not really capable in sending responses, but must work
         yield from self.push('RESP-CODES')
         yield from self.push('AUTH-RESP-CODE')
@@ -310,7 +310,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if not mail_box:
             raise AuthFailed()
         try:
-            password = yield from self._mail_box.get_password()  # type: str
+            password = yield from mail_box.get_password()  # type: str
             digest = bytes(self._greeting + password, encoding='utf-8')
             digest = hashlib.md5(digest).hexdigest()
             if user_hash != digest:
@@ -355,6 +355,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             raise POP3Exception('Authorization required')
         if not arg:
             raise POP3Exception('Syntax: DELE <message_id>')
+        yield from self._load_messages()
         arg, message = self._get_message_by_num(arg)
         self._deleted_messages.append(arg)
         yield from self.push('+OK message deleted')

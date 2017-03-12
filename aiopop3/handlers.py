@@ -54,6 +54,10 @@ class MemoryMailBox(MailBox):
             raise AuthFailed
 
     @asyncio.coroutine
+    def get_password(self):
+        return self.user.password
+
+    @asyncio.coroutine
     def get_messages(self):
         return self.user.mail_box
 
@@ -64,6 +68,8 @@ class MemoryMailBox(MailBox):
 
 
 class MemoryHandler(BaseHandler):
+    mail_box_class = MemoryMailBox
+
     def __init__(self, loop):
         super(MemoryHandler, self).__init__(loop)
         self.users = {}

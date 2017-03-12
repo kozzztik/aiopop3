@@ -1,10 +1,22 @@
+"""A POP3 server class.
+
+Author: Konstantin Volkov <kozzztik@mail.ru>
+Based on aiosmtpd
+
+Implements RFC 1939 Post Office Protocol - Version 3
+https://tools.ietf.org/html/rfc1939
+
+
+"""
+
+
 import re
 import socket
 import asyncio
 import logging
 import hashlib
 
-from .base_handler import POP3Exception, BaseHandler
+from .base_handler import POP3Exception, POP3AuthFailed, BaseHandler
 try:
     import ssl
     from asyncio import sslproto
@@ -49,12 +61,13 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         self.transport = None
         self._handler_coroutine = None
         self._mail_box = None
+        self._messages = None
+        self._message_ids = None
+        self._deleted_messages = []
+        self._read_messages = []
         self._auth_passed = False
+        self._user_name = None  # for USER/PASS auth
         self._greeting = 'stamp@{}'.format(hostname)   # TODO generate stamp
-        self._set_rset_state()
-
-    def _set_rset_state(self):
-        pass  # TODO
 
     def connection_made(self, transport):
         is_instance = (_has_ssl and
@@ -65,7 +78,6 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             self._stream_writer._transport = transport
             self.transport = transport
             # TODO Check it
-            self._set_rset_state()
             # Why _extra is protected attribute?
             extra = self._tls_protocol._extra
             auth = self.handler.handle_tls_handshake(
@@ -152,22 +164,60 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
     @asyncio.coroutine
     def commit_transaction(self):
         if self._mail_box and self._auth_passed:
+            nums = self._deleted_messages
+            if self._mail_box.remove_readed:
+                for i in self._read_messages:
+                    if i not in nums:
+                        nums.append(i)
+            msgs = [self._messages[i] for i in self._deleted_messages]
+            yield from self._mail_box.delete_messages(msgs)
             yield from self._mail_box.commit()
+            self._deleted_messages = []
+            self._read_messages = []
+            self._messages = None
+
+    @asyncio.coroutine
+    def _load_messages(self):
+        if not self._auth_passed:
+            raise POP3Exception('Authorization required')
+        if self._messages is not None:
+            return
+        self._messages = yield from self._mail_box.get_messages()
+        assert isinstance(self._messages, list)
+        self._message_ids = {}
+        for i, message in enumerate(self._messages):
+            self._message_ids[str(message.message_id)] = i
+
+    def _get_message_by_num(self, arg):
+        try:
+            arg = int(arg)
+        except ValueError:
+            raise POP3Exception('Syntax: Message number must be integer')
+        if arg > len(self._messages):
+            raise POP3Exception('No such message')
+        if arg in self._deleted_messages:
+            raise POP3Exception('Message deleted')
+        return arg, self._messages[arg]
 
     @asyncio.coroutine
     def pop_APOP(self, arg):
         if not arg or ' ' not in arg:
             raise POP3Exception('Syntax: APOP <user_name> <password_hash>')
+        if self._auth_passed:
+            raise POP3Exception('Already authenticated')
         user_name, user_hash = ''.split(' ', maxsplit=1)
         mail_box = yield from self.handler.handle_user(user_name)
-        exist = yield from mail_box.mail_box_exist()
-        if not exist:
-            raise POP3Exception('Unknown user name')
-        password = yield from self._mail_box.get_password()
-        digest = bytes(self._greeting + password, encoding='utf-8')
-        digest = hashlib.md5(digest).hexdigest()
-        if user_hash != digest:
-            raise POP3Exception('Invalid password')
+        if not mail_box:
+            raise POP3AuthFailed()
+        try:
+            password = yield from self._mail_box.get_password()
+            digest = bytes(self._greeting + password, encoding='utf-8')
+            digest = hashlib.md5(digest).hexdigest()
+            if user_hash != digest:
+                raise POP3AuthFailed()
+        except Exception:
+            yield from mail_box.rollback()
+            raise
         self._mail_box = mail_box
         self._auth_passed = True
         yield from self.push('+OK maildrop locked and ready')
@@ -176,22 +226,28 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
     def pop_USER(self, arg):
         if not arg:
             raise POP3Exception('Syntax: USER <name>')
-        mail_box = yield from self.handler.handle_user(arg)
-        exist = yield from mail_box.mail_box_exist()
-        if not exist:
-            raise POP3Exception('Unknown user name')
-        self._mail_box = mail_box
+        self._user_name = arg
         yield from self.push('+OK name is a valid mailbox')
 
     @asyncio.coroutine
     def pop_PASS(self, arg):
         if not arg:
             raise POP3Exception('Syntax: PASS <password>')
-        if self._mail_box is None:
+        if self._user_name is None:
             raise POP3Exception('USER command first')
-        password = yield from self._mail_box.get_password()
-        if password != arg:
-            raise POP3Exception('Invalid password')
+        if self._auth_passed:
+            raise POP3Exception('Already authenticated')
+        mail_box = yield from self.handler.handle_user(self._user_name)
+        if not mail_box:
+            raise POP3AuthFailed()
+        try:
+            result = yield from mail_box.check_password(arg)
+            if not result:
+                raise POP3AuthFailed()
+        except Exception:
+            yield from mail_box.rollback()
+            raise
+        self._mail_box = mail_box
         self._auth_passed = True
         yield from self.push('+OK maildrop locked and ready')
 
@@ -201,30 +257,33 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             raise POP3Exception('Authorization required')
         if not arg:
             raise POP3Exception('Syntax: DELE <message_id>')
-        exists = yield from self._mail_box.message_exists(arg)
-        if not exists:
-            raise POP3Exception('No such message')
-        yield from self._mail_box.delete_message(arg)
+        arg, message = self._get_message_by_num(arg)
+        self._deleted_messages.append(arg)
         yield from self.push('+OK message deleted')
+
+    def _get_stat(self):
+        count = 0
+        size = 0
+        for i, message in enumerate(self._messages):
+            if i not in self._deleted_messages:
+                count += 1
+                size += message.size
+        return count, size
 
     @asyncio.coroutine
     def pop_LIST(self, arg):
-        if not self._auth_passed:
-            raise POP3Exception('Authorization required')
+        yield from self._load_messages()
         if arg:
-            message = yield from self._mail_box.get_message(arg)
-            if not message:
-                raise POP3Exception('No such message')
+            arg, message = self._get_message_by_num(arg)
             yield from self.push('+OK {} ({} octets)'.format(
                 arg, message.size))
         else:
-            messages = yield from self._mail_box.get_all_messages()
-            size = sum((m.size for m in messages))
+            count, size = self._get_stat()
             yield from self.push(
-                '+OK {} messages ({} octets)'.format(len(messages), size))
-            for message in messages:
-                yield from self.push(
-                    '{} {}'.format(message.message_id, message.size))
+                '+OK {} messages ({} octets)'.format(count, size))
+            for i, message in enumerate(self._messages):
+                if i not in self._deleted_messages:
+                    yield from self.push('{} {}'.format(i, message.size))
             yield from self.push('.')
 
     @asyncio.coroutine
@@ -238,30 +297,26 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if not self._auth_passed:
             raise POP3Exception('Authorization required')
         yield from self._mail_box.rollback()
-        yield from self.push('+OK')  # TODO add text
+        self._deleted_messages = []
+        yield from self.push('+OK')
 
     @asyncio.coroutine
     def pop_STAT(self, arg):
-        if not self._auth_passed:
-            raise POP3Exception('Authorization required')
-        messages = yield from self._mail_box.get_all_messages()
-        size = sum((m.size for m in messages))
-        yield from self.push('+OK {} {}'.format(len(messages), size))
+        yield from self._load_messages()
+        count, size = self._get_stat()
+        yield from self.push('+OK {} {}'.format(count, size))
 
     @asyncio.coroutine
     def pop_TOP(self, arg):
-        if not self._auth_passed:
-            raise POP3Exception('Authorization required')
         if not arg or ' ' not in arg:
             raise POP3Exception('Syntax: TOP <message_id> <lines_count>')
-        message_id, lines_count = ''.split(' ', maxsplit=1)
+        num, lines_count = ''.split(' ', maxsplit=1)
         try:
             lines_count = int(lines_count)
         except ValueError:
             raise POP3Exception('Syntax: Lines count must be integer')
-        message = yield from self._mail_box.get_message(message_id)
-        if not message:
-            raise POP3Exception('No such message')
+        yield from self._load_messages()
+        arg, message = self._get_message_by_num(num)
         data = yield from message.get_data()
         data = _quote_periods(data)
         # TODO
@@ -270,16 +325,15 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
 
     @asyncio.coroutine
     def pop_RETR(self, arg):
-        if not self._auth_passed:
-            raise POP3Exception('Authorization required')
-        message = yield from self._mail_box.get_message(arg)
-        if not message:
-            raise POP3Exception('No such message')
+        yield from self._load_messages()
+        arg, message = self._get_message_by_num(arg)
         yield from self.push('+OK {} octets'.format(message.size))
         data = yield from message.get_data()
         self._stream_writer.write(_quote_periods(data))
         yield from self.push('')
         yield from self.push('.')
+        if arg not in self._read_messages:
+            self._read_messages.append(arg)
 
     @asyncio.coroutine
     def pop_QUIT(self, arg):
@@ -287,6 +341,8 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             raise POP3Exception('Syntax: QUIT')
         yield from self.commit_transaction()
         yield from self.push('+OK Bye')
+        # To prevent rollback on close
+        self._auth_passed = False
         self._handler_coroutine.cancel()
         self.transport.close()
 
@@ -313,6 +369,18 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         self.transport = self._tls_protocol._app_transport
         # Start handshake.
         self._tls_protocol.connection_made(socket_transport)
+
+    @asyncio.coroutine
+    def pop_UIDL(self, arg):
+        yield from self._load_messages()
+        if arg:
+            arg, message = self._get_message_by_num(arg)
+            yield from self.push('+OK {} {}'.format(arg, message.message_id))
+        else:
+            yield from self.push('+OK')
+            for i, message in enumerate(self._messages):
+                yield from self.push('{} {}'.format(i, message.message_id))
+            yield from self.push('.')
 
     # TODO SDPS
     # TODO CAPA

@@ -296,7 +296,6 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         yield from self.push('PIPELINING')
         if self.__ident__:
             yield from self.push('IMPLEMENTATION {}'.format(self.__ident__))
-        # TODO SDPS
         yield from self.capa_hook()
         yield from self.push('.')
 

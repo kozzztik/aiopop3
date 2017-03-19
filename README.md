@@ -1,6 +1,4 @@
-.. image:: https://travis-ci.org/kozzztik/aiopop3.png?branch=master
-    :target: https://travis-ci.org/kozzztik/aiopop3
-    :alt: Build Status
+[![Build status](https://travis-ci.org/kozzztik/aiopop3.svg?branch=master "Travis")](https://travis-ci.org/kozzztik/aiopop3)
 
 # aiopop3
 Asyncio POP3 Server/Client protocol implementations

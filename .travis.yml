@@ -1,6 +1,7 @@
 language: python
 install:
   - pip install tox
+  - pip install python-coveralls
 matrix:
   include:
     - python: "3.4"
@@ -11,3 +12,5 @@ matrix:
       env: INTERP=py36 PYTHONASYNCIODEBUG=1
 script:
   - tox -e $INTERP
+after_success:
+  - coveralls

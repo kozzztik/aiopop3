@@ -1,0 +1,15 @@
+language: python
+install:
+  - pip install tox
+  - pip install pytest-pylint
+  - pip install pytest-cov
+matrix:
+  include:
+    - python: "3.4"
+      env: INTERP=py34 PYTHONASYNCIODEBUG=1
+    - python: "3.5"
+      env: INTERP=py35 PYTHONASYNCIODEBUG=1
+    - python: "3.6"
+      env: INTERP=py36 PYTHONASYNCIODEBUG=1
+script:
+  - tox -e $INTERP

@@ -46,15 +46,14 @@ from .exceptions import (
     POP3Exception,
     BaseCodedException,
     AuthFailed,
-    PermException,
 )
 
 try:
     import ssl
     from asyncio import sslproto
-except ImportError:                                 # pragma: nocover
+except ImportError:
     _has_ssl = False
-else:                                               # pragma: nocover
+else:
     _has_ssl = sslproto and hasattr(ssl, 'MemoryBIO')
 
 
@@ -106,6 +105,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             os.getpid(), time.monotonic(), hostname)
         self.__ident__ = __ident__
         self.auth_mechanizms = ['PLAIN']
+        self.peer = None
 
     def connection_made(self, transport):
         is_instance = (_has_ssl and
@@ -131,7 +131,6 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             self.transport = transport
             log.info('Peer: %s', repr(self.peer))
             # Process the client's requests.
-            self.connection_closed = False
             self._stream_writer = asyncio.StreamWriter(
                 transport, self, self._stream_reader, self._loop)
             self._handler_coroutine = self.loop.create_task(
@@ -159,7 +158,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         log.info('handling connection')
         yield from self.push(
             '+OK POP3 server ready {}'.format(self._greeting))
-        while not self.connection_closed:
+        while not self._stream_reader.at_eof():
             # XXX Put the line limit stuff into the StreamReader?
             try:
                 line = yield from self._read_line()
@@ -312,8 +311,8 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         try:
             password = yield from mail_box.get_password()  # type: str
             digest = bytes(self._greeting + password, encoding='utf-8')
-            digest = hashlib.md5(digest).hexdigest()
-            if user_hash != digest:
+            digest_str = hashlib.md5(digest).hexdigest()
+            if user_hash != digest_str:
                 raise AuthFailed()
         except Exception:
             yield from mail_box.rollback()
@@ -356,7 +355,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if not arg:
             raise POP3Exception('Syntax: DELE <message_id>')
         yield from self._load_messages()
-        arg, message = self._get_message_by_num(arg)
+        arg, _ = self._get_message_by_num(arg)
         self._deleted_messages.append(arg)
         yield from self.push('+OK message deleted')
 
@@ -431,8 +430,8 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             self._stream_writer.write(_quote_periods(line))
             yield from self._stream_writer.drain()
         self._stream_writer.write(b'\r\n.\r\n')
-        log.info('Message {} ({}) {} first lines send'.format(
-            arg, message.message_id, lines_count))
+        log.info('Message %s (%s) %s first lines send',
+                 arg, message.message_id, lines_count)
         yield from self._stream_writer.drain()
 
     @asyncio.coroutine
@@ -443,7 +442,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         data = yield from message.get_data()
         self._stream_writer.write(_quote_periods(data))
         self._stream_writer.write(b'\r\n.\r\n')
-        log.info('Message {} ({}) is send'.format(arg, message.message_id))
+        log.info('Message %s (%s) is send', arg, message.message_id)
         yield from self._stream_writer.drain()
         if arg not in self._read_messages:
             self._read_messages.append(arg)
@@ -529,7 +528,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             arg = yield from self._read_line()
         arg = base64.b64decode(arg)
         params = arg.split(b'\x00')
-        authzid, authcid, passwd = [p.decode('utf-8') for p in params]
+        _, authcid, passwd = [p.decode('utf-8') for p in params]
         mail_box = yield from self.handler.handle_user(authcid)
         if not mail_box:
             return

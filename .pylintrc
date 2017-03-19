@@ -1,0 +1,18 @@
+[MESSAGES CONTROL]
+# C0111:Missing method docstring (missing-docstring)
+# W0212:Access to a protected member of a client class (protected-access)
+# C0103:Invalid method name "pop_QUIT" (invalid-name)
+# W0511:TODO
+# W0703:Catching too general exception Exception (broad-except)
+# R0903:Too few public methods (1/2) (too-few-public-methods)
+# W0613:Unused argument 'cipher' (unused-argument)
+# R0902:Too many instance attributes (8/7) (too-many-instance-attributes)
+# R0201:Method could be a function (no-self-use)
+# R0904:Too many public methods (23/20) (too-many-public-methods)
+# C0412:Imports from package asyncio are not grouped (ungrouped-imports)
+
+
+disable=C0111,W0212,C0103,W0511,W0703,R0903,W0613,R0902,R0201,R0904,C0412
+
+[REPORTS]
+msg-template = {path}:{line} {msg_id}:{msg} ({symbol})

@@ -59,14 +59,14 @@ class TestPOP3(unittest.TestCase):
     def test_apop_no_arg(self):
         with POP3(*self.address) as client:
             client._putcmd('APOP')
-            response, o = client._getline()
+            response, _ = client._getline()
             self.assertEqual(
                 response, b'-ERR Syntax: APOP <user_name> <password_hash>')
 
     def test_apop_one_arg(self):
         with POP3(*self.address) as client:
             client._putcmd('APOP admin')
-            response, o = client._getline()
+            response, _ = client._getline()
             self.assertEqual(
                 response, b'-ERR Syntax: APOP <user_name> <password_hash>')
 
@@ -147,7 +147,7 @@ class TestPOP3(unittest.TestCase):
     def test_list_all(self):
         with POP3(*self.address) as client:
             client.apop(self.user_name, self.password)
-            resp, msgs, octets = client.list()
+            resp, msgs, _ = client.list()
             self.assertEqual(resp, b'+OK 2 messages (41 octets)')
             self.assertListEqual(msgs, [b'0 20', b'1 21'])
 
@@ -185,7 +185,7 @@ class TestPOP3(unittest.TestCase):
         with POP3(*self.address) as client:
             client.apop(self.user_name, self.password)
             client.list()
-            resp, msgs, octets = client.list()
+            resp, msgs, _ = client.list()
             self.assertEqual(resp, b'+OK 2 messages (41 octets)')
             self.assertListEqual(msgs, [b'0 20', b'1 21'])
 
@@ -209,7 +209,7 @@ class TestPOP3(unittest.TestCase):
             client.apop(self.user_name, self.password)
             resp = client.dele(0)
             self.assertEqual(resp, b'+OK message deleted')
-            resp, msgs, octets = client.list()
+            resp, msgs, _ = client.list()
             self.assertEqual(resp, b'+OK 1 messages (21 octets)')
             self.assertListEqual(msgs, [b'1 21'])
             self.assertEqual(len(self.user.mail_box), 2)

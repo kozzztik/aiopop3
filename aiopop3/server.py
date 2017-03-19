@@ -106,6 +106,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         self.__ident__ = __ident__
         self.auth_mechanizms = ['PLAIN']
         self.peer = None
+        self._over_ssl = False
 
     def connection_made(self, transport):
         is_instance = (_has_ssl and

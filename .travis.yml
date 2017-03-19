@@ -1,8 +1,6 @@
 language: python
 install:
   - pip install tox
-  - pip install pytest-pylint
-  - pip install pytest-cov
 matrix:
   include:
     - python: "3.4"

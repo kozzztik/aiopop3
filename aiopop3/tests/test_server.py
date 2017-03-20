@@ -225,11 +225,11 @@ class TestPOP3(unittest.TestCase):
             client.apop(self.user_name, self.password)
             resp = client.dele(1)
             self.assertEqual(resp, b'+OK message deleted')
-            resp, msgs, _ = client.list()
+            resp = client.list()[0]
             self.assertEqual(resp, b'+OK 1 messages (21 octets)')
             resp = client.rset()
             self.assertEqual(resp, b'+OK')
-            resp, msgs, _ = client.list()
+            resp = client.list()[0]
             self.assertEqual(resp, b'+OK 2 messages (41 octets)')
         self.assertEqual(len(self.user.mail_box), 2)
 

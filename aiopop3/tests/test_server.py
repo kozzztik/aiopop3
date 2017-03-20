@@ -149,13 +149,13 @@ class TestPOP3(unittest.TestCase):
             client.apop(self.user_name, self.password)
             resp, msgs, _ = client.list()
             self.assertEqual(resp, b'+OK 2 messages (41 octets)')
-            self.assertListEqual(msgs, [b'0 20', b'1 21'])
+            self.assertListEqual(msgs, [b'1 20', b'2 21'])
 
     def test_list_message(self):
         with POP3(*self.address) as client:
             client.apop(self.user_name, self.password)
-            response = client.list(0)
-            self.assertEqual(response, b'+OK 0 (20 octets)')
+            response = client.list(1)
+            self.assertEqual(response, b'+OK 1 (20 octets)')
 
     def test_list_syntax(self):
         with POP3(*self.address) as client:
@@ -187,7 +187,7 @@ class TestPOP3(unittest.TestCase):
             client.list()
             resp, msgs, _ = client.list()
             self.assertEqual(resp, b'+OK 2 messages (41 octets)')
-            self.assertListEqual(msgs, [b'0 20', b'1 21'])
+            self.assertListEqual(msgs, [b'1 20', b'2 21'])
 
     def test_dele_no_auth(self):
         with POP3(*self.address) as client:
@@ -207,10 +207,79 @@ class TestPOP3(unittest.TestCase):
     def test_dele(self):
         with POP3(*self.address) as client:
             client.apop(self.user_name, self.password)
-            resp = client.dele(0)
+            resp = client.dele(1)
             self.assertEqual(resp, b'+OK message deleted')
             resp, msgs, _ = client.list()
             self.assertEqual(resp, b'+OK 1 messages (21 octets)')
-            self.assertListEqual(msgs, [b'1 21'])
+            self.assertListEqual(msgs, [b'2 21'])
             self.assertEqual(len(self.user.mail_box), 2)
         self.assertEqual(len(self.user.mail_box), 1)
+
+    def test_noop(self):
+        with POP3(*self.address) as client:
+            response = client.noop()
+            self.assertEqual(response, b'+OK')
+
+    def test_rset(self):
+        with POP3(*self.address) as client:
+            client.apop(self.user_name, self.password)
+            resp = client.dele(1)
+            self.assertEqual(resp, b'+OK message deleted')
+            resp, msgs, _ = client.list()
+            self.assertEqual(resp, b'+OK 1 messages (21 octets)')
+            resp = client.rset()
+            self.assertEqual(resp, b'+OK')
+            resp, msgs, _ = client.list()
+            self.assertEqual(resp, b'+OK 2 messages (41 octets)')
+        self.assertEqual(len(self.user.mail_box), 2)
+
+    def test_rset_no_auth(self):
+        with POP3(*self.address) as client:
+            with self.assertRaises(error_proto) as e:
+                client.rset()
+            msg = e.exception.args[0]
+            self.assertEqual(msg, b'-ERR Authorization required')
+
+    def test_stat_no_auth(self):
+        with POP3(*self.address) as client:
+            with self.assertRaises(error_proto) as e:
+                client.stat()
+            msg = e.exception.args[0]
+            self.assertEqual(msg, b'-ERR Authorization required')
+
+    def test_stat_syntax(self):
+        with POP3(*self.address) as client:
+            with self.assertRaises(error_proto) as e:
+                client._shortcmd('STAT 1')
+            msg = e.exception.args[0]
+            self.assertEqual(msg, b'-ERR Syntax: STAT')
+
+    def test_stat(self):
+        with POP3(*self.address) as client:
+            client.apop(self.user_name, self.password)
+            count, size = client.stat()
+            self.assertEqual(count, 2)
+            self.assertEqual(size, 41)
+
+    def test_top_syntax(self):
+        with POP3(*self.address) as client:
+            with self.assertRaises(error_proto) as e:
+                client._shortcmd('TOP')
+            msg = e.exception.args[0]
+            self.assertEqual(msg,
+                             b'-ERR Syntax: TOP <message_id> <lines_count>')
+
+    def test_top_str_lines(self):
+        with POP3(*self.address) as client:
+            with self.assertRaises(error_proto) as e:
+                client._shortcmd('TOP 1 foo')
+            msg = e.exception.args[0]
+            self.assertEqual(msg,
+                             b'-ERR Syntax: Lines count must be integer')
+
+    def test_top_no_auth(self):
+        with POP3(*self.address) as client:
+            with self.assertRaises(error_proto) as e:
+                client.top(1, 1)
+            msg = e.exception.args[0]
+            self.assertEqual(msg, b'-ERR Authorization required')

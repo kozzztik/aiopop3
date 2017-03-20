@@ -246,11 +246,11 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
             arg = int(arg)
         except ValueError:
             raise POP3Exception('Syntax: Message number must be integer')
-        if arg > len(self._messages):
+        if arg > len(self._messages) or arg < 1:
             raise POP3Exception('No such message')
         if arg in self._deleted_messages:
             raise POP3Exception('Message deleted')
-        return arg, self._messages[arg]
+        return arg - 1, self._messages[arg - 1]
 
     @asyncio.coroutine
     def capa_hook(self):
@@ -375,14 +375,14 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
         if arg:
             arg, message = self._get_message_by_num(arg)
             yield from self.push('+OK {} ({} octets)'.format(
-                arg, message.size))
+                arg + 1, message.size))
         else:
             count, size = self._get_stat()
             yield from self.push(
                 '+OK {} messages ({} octets)'.format(count, size))
             for i, message in enumerate(self._messages):
                 if i not in self._deleted_messages:
-                    yield from self.push('{} {}'.format(i, message.size))
+                    yield from self.push('{} {}'.format(i + 1, message.size))
             yield from self.push('.')
 
     @asyncio.coroutine
@@ -401,6 +401,8 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
 
     @asyncio.coroutine
     def pop_STAT(self, arg):
+        if arg:
+            raise POP3Exception('Syntax: STAT')
         yield from self._load_messages()
         count, size = self._get_stat()
         yield from self.push('+OK {} {}'.format(count, size))
@@ -409,7 +411,7 @@ class POP3ServerProtocol(asyncio.StreamReaderProtocol):
     def pop_TOP(self, arg):
         if not arg or ' ' not in arg:
             raise POP3Exception('Syntax: TOP <message_id> <lines_count>')
-        num, lines_count = ''.split(' ', maxsplit=1)
+        num, lines_count = arg.split(' ', maxsplit=1)
         try:
             lines_count = int(lines_count)
         except ValueError:
